@@ -30,6 +30,9 @@ from service import Exporter, ExporterError
 logger = logging.getLogger(__name__)
 
 
+PEER = "peers"
+
+
 class HardwareObserverCharm(ops.CharmBase):
     """Charm the application."""
 
@@ -66,6 +69,11 @@ class HardwareObserverCharm(ops.CharmBase):
         self.framework.observe(
             self.on.cos_agent_relation_departed, self._on_cos_agent_relation_departed
         )
+        self.framework.observe(self.on[PEER].relation_created, self._setup_secret)
+        self.framework.observe(self.on[PEER].relation_joined, self._setup_secret)
+        self.framework.observe(self.on[PEER].relation_changed, self._setup_secret)
+        self.framework.observe(self.on[PEER].relation_departed, self._teardown_secret)
+        self.framework.observe(self.on.secret_changed, self._on_secret_changed)
 
         self._stored.set_default(
             exporter_installed=False,
@@ -73,9 +81,72 @@ class HardwareObserverCharm(ops.CharmBase):
         )
         self.num_cos_agent_relations = self.get_num_cos_agent_relations("cos-agent")
 
+    def _get_peers(self):
+        """Fetch the peer relation."""
+        return self.model.get_relation(PEER)
+
+    def _set_peer_data(self, key: str, data: str) -> None:
+        """Put information into the peer data bucket instead of `StoredState`."""
+        peers = self._get_peers()
+        peers.data[self.model.unit][key] = data
+
+    def _get_peer_data(self, key: str) -> str:
+        """Retrieve information from the peer data bucket instead of `StoredState`."""
+        peers = self._get_peers()
+        return peers.data[self.model.unit].get(key, "")
+
+    def _get_per_unit_secret_label(self) -> str:
+        """Get per unit's label for secret."""
+        return self.model.unit.name
+
+    def _on_secret_changed(self, event: ops.RelationEvent) -> None:
+        """Handle secret changed."""
+        # TODO: configure charm
+        logger.info(event)
+        logger.info(self._get_secret_content())
+
+    def _get_secret_content(self) -> dict[str, str]:
+        """Get secret."""
+        credential_id = self._get_peer_data("secret_id")
+        if credential_id:
+            secret = self.model.get_secret(id=credential_id)
+            content = secret.get_content(refresh=True)
+        return content
+
+    def _setup_secret(self, event: ops.RelationEvent) -> str:
+        """Set up a secret for each unit."""
+        credential_id = self._get_peer_data("secret_id")
+        if credential_id:
+            return credential_id
+
+        credential_secret = self.model.unit.add_secret(
+            {
+                "username": "null",
+                "password": "null",
+            },
+            label=self._get_per_unit_secret_label(),
+        )
+        self._set_peer_data("secret_id", credential_secret.id)
+        return credential_secret.id
+
+    def _teardown_secret(self, event: ops.RelationEvent):
+        """Tear down the secret if exists."""
+        credential_id = self._get_peer_data("secret_id")
+        try:
+            if credential_id:
+                secret = self.model.get_secret(id=credential_id)
+                secret.remove_all_revisions()
+                self._set_peer_data("secret_id", "")
+        except ops.model.SecretNotFoundError:
+            # There might be race condition between removing the principal
+            # application and removing peer unit
+            pass
+
     def _on_install_or_upgrade(self, event: ops.InstallEvent) -> None:
         """Install or upgrade charm."""
         self.model.unit.status = MaintenanceStatus("Installing resources...")
+        logger.error("getting peers:")
+        logger.error(self._get_peers())
 
         resource_installed, msg = self.hw_tool_helper.install(self.model.resources)
         self._stored.resource_installed = resource_installed

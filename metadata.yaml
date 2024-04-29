@@ -71,3 +71,7 @@ requires:
   general-info:
     interface: juju-info
     scope: container
+
+peers:
+  peers:
+    interface: hardware-observer-peers
